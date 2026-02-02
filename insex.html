@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 籃球挑戰賽</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'PingFang TC', sans-serif; background: #000; }
+        canvas { display: block; }
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+        }
+        .hud-panel { pointer-events: auto; background: rgba(0,0,0,0.6); padding: 15px; border-radius: 10px; border: 2px solid #f59e0b; }
+        #crosshair {
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 20px; height: 20px;
+            border: 2px solid white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+        #power-bar-container {
+            position: absolute;
+            bottom: 100px; left: 50%;
+            transform: translateX(-50%);
+            width: 200px; height: 20px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 10px;
+            overflow: hidden;
+            display: none;
+        }
+        #power-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #fbbf24, #ef4444); transition: width 0.1s; }
+        #start-screen {
+            position: absolute;
+            inset: 0; background: rgba(0,0,0,0.8);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 100; pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="start-screen">
+        <h1 class="text-6xl font-black text-amber-500 mb-4">3D BASKETBALL MASTER</h1>
+        <p class="text-xl text-white mb-8">方向鍵 (Arrow Keys) 移動 | 空白鍵 蓄力/投籃 | 滑鼠 調整視角</p>
+        <button id="start-btn" class="px-10 py-4 bg-amber-600 hover:bg-amber-500 text-white text-2xl font-bold rounded-full transition-all transform hover:scale-110">
+            開始比賽
+        </button>
+    </div>
+
+    <div id="ui-layer">
+        <div class="flex justify-between">
+            <div class="hud-panel">
+                <div class="text-sm uppercase opacity-70">得分</div>
+                <div id="score" class="text-4xl font-bold">0</div>
+            </div>
+            <div class="hud-panel text-center">
+                <div class="text-sm uppercase opacity-70">剩餘時間</div>
+                <div id="timer" class="text-4xl font-mono">02:00</div>
+            </div>
+            <div class="hud-panel text-right">
+                <div class="text-sm uppercase opacity-70">連進加成</div>
+                <div id="streak" class="text-4xl font-bold text-blue-400">x1</div>
+            </div>
+        </div>
+
+        <div id="power-bar-container">
+            <div id="power-bar"></div>
+        </div>
+
+        <div class="flex justify-between items-end">
+            <div class="hud-panel">
+                <div class="text-xs mb-1">道具狀態</div>
+                <div id="powerup-status" class="text-green-400">無主動道具</div>
+            </div>
+            <div class="hud-panel">
+                <button id="toggle-audio" class="text-xs underline">靜音 BGM</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="crosshair"></div>
+
+    <audio id="bgm" loop>
+        <source src="Embers on the Rampart (1).mp3" type="audio/mpeg">
+    </audio>
+
+    <script>
+        // --- 遊戲配置 ---
+        let gameActive = false;
+        let score = 0;
+        let streak = 0;
+        let timeLeft = 120;
+        let power = 0;
+        let isCharging = false;
+        let activePowerup = null;
+
+        // --- Three.js 變數 ---
+        let scene, camera, renderer, clock;
+        let player, ball;
+        const gravity = -9.8;
+        let ballVelocity = new THREE.Vector3();
+        let isBallInFlight = false;
+        let keys = {};
+
+        // --- 初始化場景 ---
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+            scene.fog = new THREE.Fog(0x111111, 10, 50);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            clock = new THREE.Clock();
+
+            // 光影設定
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            const spotLight = new THREE.SpotLight(0xffffff, 0.8);
+            spotLight.position.set(0, 20, 0);
+            spotLight.castShadow = true;
+            scene.add(spotLight);
+
+            createCourt();
+            createHoop();
+            createPlayer();
+            createBall();
+            spawnPowerup();
+
+            // 事件監聽
+            window.addEventListener('keydown', (e) => keys[e.code] = true);
+            window.addEventListener('keyup', (e) => {
+                keys[e.code] = false;
+                if(e.code === 'Space' && gameActive) releaseBall();
+            });
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('resize', onWindowResize);
+
+            document.getElementById('start-btn').addEventListener('click', startGame);
+            document.getElementById('toggle-audio').addEventListener('click', toggleAudio);
+        }
+
+        function createCourt() {
+            // 地板
+            const floorGeo = new THREE.PlaneGeometry(30, 40);
+            const floorMat = new THREE.MeshPhongMaterial({ 
+                color: 0xd97706, 
+                side: THREE.DoubleSide
+            });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = Math.PI / 2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // 球場線條
+            const lineGeo = new THREE.PlaneGeometry(30, 0.2);
+            const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            const midLine = new THREE.Mesh(lineGeo, lineMat);
+            midLine.rotation.x = Math.PI / 2;
+            midLine.position.y = 0.01;
+            scene.add(midLine);
+        }
+
+        function createHoop() {
+            const group = new THREE.Group();
+
+            // 支架
+            const poleGeo = new THREE.BoxGeometry(0.5, 10, 0.5);
+            const poleMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
+            const pole = new THREE.Mesh(poleGeo, poleMat);
+            pole.position.set(0, 5, -19);
+            group.add(pole);
+
+            // 籃板
+            const boardGeo = new THREE.BoxGeometry(6, 4, 0.2);
+            const boardMat = new THREE.MeshPhongMaterial({ color: 0xeeeeee, transparent: true, opacity: 0.8 });
+            const board = new THREE.Mesh(boardGeo, boardMat);
+            board.position.set(0, 8, -18.5);
+            group.add(board);
+
+            // 籃框
+            const rimGeo = new THREE.TorusGeometry(0.8, 0.05, 16, 100);
+            const rimMat = new THREE.MeshPhongMaterial({ color: 0xff4400 });
+            const rim = new THREE.Mesh(rimGeo, rimMat);
+            rim.rotation.x = Math.PI / 2;
+            rim.position.set(0, 7, -17.5);
+            rim.name = "rim";
+            group.add(rim);
+
+            scene.add(group);
+        }
+
+        function createPlayer() {
+            const group = new THREE.Group();
+            
+            // 使用 Cylinder 代替 Capsule 以相容舊版 Three.js
+            const bodyGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 16);
+            const bodyMat = new THREE.MeshPhongMaterial({ color: 0x3b82f6 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 1;
+            body.castShadow = true;
+            group.add(body);
+
+            // 頭部
+            const headGeo = new THREE.SphereGeometry(0.4, 16, 16);
+            const head = new THREE.Mesh(headGeo, bodyMat);
+            head.position.y = 1.8;
+            group.add(head);
+
+            player = group;
+            player.position.set(0, 0, 10);
+            scene.add(player);
+        }
+
+        function createBall() {
+            const ballGeo = new THREE.SphereGeometry(0.3, 32, 32);
+            const ballMat = new THREE.MeshPhongMaterial({ color: 0xf97316 });
+            ball = new THREE.Mesh(ballGeo, ballMat);
+            ball.castShadow = true;
+            scene.add(ball);
+            resetBall();
+        }
+
+        function spawnPowerup() {
+            const geo = new THREE.OctahedronGeometry(0.4);
+            const mat = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
+            const p = new THREE.Mesh(geo, mat);
+            p.position.set((Math.random()-0.5)*20, 0.5, (Math.random()-0.5)*20);
+            p.name = "powerup";
+            scene.add(p);
+        }
+
+        // --- 遊戲邏輯 ---
+        function startGame() {
+            document.getElementById('start-screen').style.display = 'none';
+            gameActive = true;
+            const bgm = document.getElementById('bgm');
+            bgm.play().catch(() => console.log("等待用戶交互以播放音訊"));
+            
+            // 計時器
+            const timerInterval = setInterval(() => {
+                if(gameActive && timeLeft > 0) {
+                    timeLeft--;
+                    let m = Math.floor(timeLeft/60);
+                    let s = timeLeft % 60;
+                    document.getElementById('timer').innerText = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+                } else if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                }
+            }, 1000);
+        }
+
+        function toggleAudio() {
+            const bgm = document.getElementById('bgm');
+            bgm.muted = !bgm.muted;
+            document.getElementById('toggle-audio').innerText = bgm.muted ? "開啟 BGM" : "靜音 BGM";
+        }
+
+        function onMouseMove(e) {
+            if(!gameActive) return;
+            const movementX = e.movementX || 0;
+            player.rotation.y -= movementX * 0.003;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function resetBall() {
+            isBallInFlight = false;
+            ballVelocity.set(0,0,0);
+            ball.position.copy(player.position);
+            ball.position.y += 1.2;
+        }
+
+        function releaseBall() {
+            if(isBallInFlight) return;
+            
+            isBallInFlight = true;
+            isCharging = false;
+            
+            const direction = new THREE.Vector3(0, 0.7, -1).applyQuaternion(player.quaternion);
+            const finalPower = 15 + (power * 0.15);
+            
+            ballVelocity.copy(direction).multiplyScalar(finalPower);
+            
+            power = 0;
+            document.getElementById('power-bar-container').style.display = 'none';
+        }
+
+        function checkScore() {
+            const hoopPos = new THREE.Vector3(0, 7, -17.5);
+            const dist = ball.position.distanceTo(hoopPos);
+            
+            if(dist < 0.8 && ballVelocity.y < 0) {
+                score += 2 * (streak + 1);
+                streak++;
+                document.getElementById('score').innerText = score;
+                document.getElementById('streak').innerText = `x${streak+1}`;
+                
+                scene.background = new THREE.Color(0x224422);
+                setTimeout(() => scene.background = new THREE.Color(0x111111), 200);
+                
+                resetBall();
+            }
+        }
+
+        // --- 主循環 ---
+        function update() {
+            const delta = clock.getDelta();
+
+            if(gameActive) {
+                // 移動控制 - 方向鍵
+                const moveSpeed = (activePowerup === "SPEED" ? 12 : 6) * delta;
+                if(keys['ArrowUp']) player.translateZ(-moveSpeed);
+                if(keys['ArrowDown']) player.translateZ(moveSpeed);
+                if(keys['ArrowLeft']) player.translateX(-moveSpeed);
+                if(keys['ArrowRight']) player.translateX(moveSpeed);
+
+                // 蓄力邏輯
+                if(keys['Space'] && !isBallInFlight) {
+                    isCharging = true;
+                    power = Math.min(power + 2, 100);
+                    document.getElementById('power-bar-container').style.display = 'block';
+                    document.getElementById('power-bar').style.width = power + '%';
+                }
+
+                // 物理更新
+                if(isBallInFlight) {
+                    ballVelocity.y += gravity * delta;
+                    ball.position.add(ballVelocity.clone().multiplyScalar(delta));
+
+                    if(ball.position.y < 0.3) {
+                        if(ballVelocity.length() > 2) {
+                            ballVelocity.y *= -0.6;
+                            streak = 0;
+                            document.getElementById('streak').innerText = `x1`;
+                        } else {
+                            resetBall();
+                        }
+                    }
+
+                    // 碰撞籃板
+                    if(ball.position.z < -18.3 && Math.abs(ball.position.x) < 3 && ball.position.y > 6 && ball.position.y < 10) {
+                        ballVelocity.z *= -0.5;
+                        ball.position.z = -18.2;
+                    }
+
+                    checkScore();
+                } else {
+                    // 持球跟隨球員
+                    ball.position.copy(player.position);
+                    ball.position.y = 1.2 + Math.sin(Date.now() * 0.01) * 0.2;
+                    const offset = new THREE.Vector3(0.6, 0, -0.5).applyQuaternion(player.quaternion);
+                    ball.position.add(offset);
+                }
+
+                // 道具碰撞
+                const powerup = scene.getObjectByName("powerup");
+                if(powerup) {
+                    powerup.rotation.y += delta * 2;
+                    if(player.position.distanceTo(powerup.position) < 1.5) {
+                        activePowerup = "SPEED";
+                        document.getElementById('powerup-status').innerText = "獲得：神速 (5s)";
+                        scene.remove(powerup);
+                        setTimeout(() => {
+                            activePowerup = null;
+                            document.getElementById('powerup-status').innerText = "無主動道具";
+                            spawnPowerup();
+                        }, 5000);
+                    }
+                }
+            }
+
+            // 相機邏輯
+            const camOffset = new THREE.Vector3(0, 2.5, 5).applyQuaternion(player.quaternion);
+            camera.position.lerp(player.position.clone().add(camOffset), 0.1);
+            camera.lookAt(player.position.clone().add(new THREE.Vector3(0, 1.5, -2).applyQuaternion(player.quaternion)));
+
+            renderer.render(scene, camera);
+            requestAnimationFrame(update);
+        }
+
+        // 開始運行
+        window.onload = function() {
+            init();
+            update();
+        };
+    </script>
+</body>
+</html>
